@@ -1,0 +1,27 @@
+# Datos de clientes (NUNCA subir)
+**/inventarios y reportes/
+**/calculadoras/
+**/diagramas/*.png
+**/diagramas/*.svg
+
+# Credenciales
+.env
+*.pem
+*.key
+credentials.json
+**/secrets/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
