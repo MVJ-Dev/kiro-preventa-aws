@@ -76,40 +76,55 @@ section() {
 
 # Ejecutar comando Azure con manejo de errores
 # Retorna JSON o array vacío si falla
+# Escribe a archivo temporal para evitar ARG_MAX con payloads grandes
 az_safe() {
     local description="$1"
     shift
-    local result
-    result=$(az "$@" --output json 2>/dev/null)
-    if [ $? -ne 0 ] || [ -z "$result" ]; then
-        log "WARN" "Comando falló o sin datos: ${description} -> az $*"
-        echo "[]"
-        return 1
+    local tmpfile="${TEMP_DIR}/_cmd_result.json"
+    
+    if timeout 30 az "$@" --output json > "$tmpfile" 2>/dev/null; then
+        if [[ -s "$tmpfile" ]] && jq empty "$tmpfile" 2>/dev/null; then
+            cat "$tmpfile"
+            log "OK" "$description"
+            return 0
+        fi
     fi
-    echo "$result"
-    return 0
+    
+    log "WARN" "Comando falló o sin datos: ${description} -> az $*"
+    echo "[]"
+    return 1
 }
 
 # Ejecutar comando Azure que retorna un objeto (no array)
 az_safe_obj() {
     local description="$1"
     shift
-    local result
-    result=$(az "$@" --output json 2>/dev/null)
-    if [ $? -ne 0 ] || [ -z "$result" ]; then
-        log "WARN" "Comando falló o sin datos: ${description} -> az $*"
-        echo "{}"
-        return 1
+    local tmpfile="${TEMP_DIR}/_cmd_result_obj.json"
+    
+    if timeout 30 az "$@" --output json > "$tmpfile" 2>/dev/null; then
+        if [[ -s "$tmpfile" ]] && jq empty "$tmpfile" 2>/dev/null; then
+            cat "$tmpfile"
+            log "OK" "$description"
+            return 0
+        fi
     fi
-    echo "$result"
-    return 0
+    
+    log "WARN" "Comando falló o sin datos: ${description} -> az $*"
+    echo "{}"
+    return 1
 }
 
-# Escribir resultado temporal por servicio
+# Escribir resultado temporal por servicio (usa archivo, no variable)
 write_temp() {
     local service_key="$1"
     local data="$2"
     echo "$data" > "${TEMP_DIR}/${service_key}.json"
+}
+
+# Escribir resultado temporal desde stdin (para datos grandes que exceden ARG_MAX)
+write_temp_stdin() {
+    local service_key="$1"
+    cat > "${TEMP_DIR}/${service_key}.json"
 }
 
 #===============================================================================
@@ -144,8 +159,9 @@ echo -e "${GREEN}Directorio de salida: ${OUTPUT_DIR}${NC}"
 echo -e "${GREEN}Iniciando levantamiento...${NC}"
 echo ""
 
-# Calcular total de servicios para el indicador de progreso (dinámico)
-TOTAL_SERVICES=$(grep -c '^\s*progress ' "$0")
+# Calcular total de servicios para el indicador de progreso
+TOTAL_SERVICES=$(grep -c '^\s*progress ' "$0" 2>/dev/null)
+TOTAL_SERVICES=${TOTAL_SERVICES:-35}
 
 
 #===============================================================================
@@ -201,41 +217,44 @@ descubrir_contexto() {
 descubrir_entra_id() {
     section "ENTRA ID: Usuarios, Grupos, Service Principals, Apps"
 
-    # Usuarios (puede haber muchos, limitamos a los primeros 999 por API)
-    local users
-    users=$(az_safe "usuarios AD" ad user list --all)
-    progress "Entra ID: Usuarios ($(echo "$users" | jq 'length'))"
+    # Escribir directamente a archivos para evitar ARG_MAX con tenants grandes
+    local users_file="${TEMP_DIR}/_entra_users.json"
+    local groups_file="${TEMP_DIR}/_entra_groups.json"
+    local sps_file="${TEMP_DIR}/_entra_sps.json"
+    local apps_file="${TEMP_DIR}/_entra_apps.json"
+
+    # Usuarios
+    timeout 30 az ad user list --all --output json > "$users_file" 2>/dev/null || echo "[]" > "$users_file"
+    jq empty "$users_file" 2>/dev/null || echo "[]" > "$users_file"
+    progress "Entra ID: Usuarios ($(jq 'length' "$users_file"))"
 
     # Grupos
-    local groups
-    groups=$(az_safe "grupos AD" ad group list --all)
-    progress "Entra ID: Grupos ($(echo "$groups" | jq 'length'))"
+    timeout 30 az ad group list --all --output json > "$groups_file" 2>/dev/null || echo "[]" > "$groups_file"
+    jq empty "$groups_file" 2>/dev/null || echo "[]" > "$groups_file"
+    progress "Entra ID: Grupos ($(jq 'length' "$groups_file"))"
 
-    # Service Principals
-    local service_principals
-    service_principals=$(az_safe "service principals" ad sp list --all)
-    progress "Entra ID: Service Principals ($(echo "$service_principals" | jq 'length'))"
+    # Service Principals - puede ser MUY grande (miles de SPs en tenants enterprise)
+    timeout 90 az ad sp list --all --output json > "$sps_file" 2>/dev/null || echo "[]" > "$sps_file"
+    jq empty "$sps_file" 2>/dev/null || echo "[]" > "$sps_file"
+    progress "Entra ID: Service Principals ($(jq 'length' "$sps_file"))"
 
     # App Registrations
-    local app_registrations
-    app_registrations=$(az_safe "app registrations" ad app list --all)
-    progress "Entra ID: App Registrations ($(echo "$app_registrations" | jq 'length'))"
+    timeout 60 az ad app list --all --output json > "$apps_file" 2>/dev/null || echo "[]" > "$apps_file"
+    jq empty "$apps_file" 2>/dev/null || echo "[]" > "$apps_file"
+    progress "Entra ID: App Registrations ($(jq 'length' "$apps_file"))"
 
-    # Construir JSON
-    local entra_json
-    entra_json=$(jq -n \
-        --argjson users "$users" \
-        --argjson groups "$groups" \
-        --argjson sps "$service_principals" \
-        --argjson apps "$app_registrations" \
+    # Ensamblar usando jq con --slurpfile (lee de archivo, no pasa por argumento)
+    jq -n \
+        --slurpfile users "$users_file" \
+        --slurpfile groups "$groups_file" \
+        --slurpfile sps "$sps_file" \
+        --slurpfile apps "$apps_file" \
         '{
-            users: $users,
-            groups: $groups,
-            service_principals: $sps,
-            app_registrations: $apps
-        }')
-
-    write_temp "01_entra_id" "$entra_json"
+            users: $users[0],
+            groups: $groups[0],
+            service_principals: $sps[0],
+            app_registrations: $apps[0]
+        }' > "${TEMP_DIR}/01_entra_id.json"
 }
 
 #===============================================================================
@@ -474,8 +493,10 @@ descubrir_container_instances() {
     while IFS= read -r sub_id; do
         [ -z "$sub_id" ] && continue
 
+        # Usar az resource list como método más confiable (no requiere --resource-group)
         local groups
-        groups=$(az_safe "container instances en ${sub_id}" container list --subscription "$sub_id")
+        groups=$(az_safe "container instances en ${sub_id}" resource list \
+            --resource-type "Microsoft.ContainerInstance/containerGroups" --subscription "$sub_id")
         groups=$(echo "$groups" | jq --arg sid "$sub_id" '[.[] | . + {subscription_id: $sid}]')
         all_groups=$(echo "$all_groups" "$groups" | jq -s '.[0] + .[1]')
 
@@ -622,10 +643,16 @@ descubrir_load_balancing() {
         appgws=$(echo "$appgws" | jq --arg sid "$sub_id" '[.[] | . + {subscription_id: $sid}]')
         all_appgws=$(echo "$all_appgws" "$appgws" | jq -s '.[0] + .[1]')
 
-        # Front Door
+        # Front Door (requiere extensión front-door, puede no estar instalada)
         local frontdoors
         frontdoors=$(az_safe "front doors en ${sub_id}" network front-door list --subscription "$sub_id")
         frontdoors=$(echo "$frontdoors" | jq --arg sid "$sub_id" '[.[] | . + {subscription_id: $sid}]')
+        # Si front-door extension no está, intentar con afd (Azure Front Door Standard/Premium)
+        if [[ "$frontdoors" == "[]" ]]; then
+            local afd_profiles
+            afd_profiles=$(az_safe "AFD profiles en ${sub_id}" afd profile list --subscription "$sub_id")
+            frontdoors=$(echo "$afd_profiles" | jq --arg sid "$sub_id" '[.[] | . + {subscription_id: $sid, type: "Standard_Premium"}]')
+        fi
         all_frontdoors=$(echo "$all_frontdoors" "$frontdoors" | jq -s '.[0] + .[1]')
 
         # Traffic Manager
@@ -871,15 +898,15 @@ descubrir_storage() {
         for acct_name in $(echo "$accounts" | jq -r '.[].name // empty'); do
             local rg=$(echo "$accounts" | jq -r --arg n "$acct_name" '.[] | select(.name==$n) | .resourceGroup')
 
-            # Obtener connection string no es posible con Reader, usar account key list tampoco
-            # Usamos --auth-mode login para acceder sin keys
+            # NOTA: --auth-mode login requiere Storage Blob Data Reader role (no solo Reader)
+            # Si no tiene permiso, falla rápido gracias al timeout en az_safe
             local containers
             containers=$(az_safe "containers en ${acct_name}" storage container list \
-                --account-name "$acct_name" --auth-mode login --subscription "$sub_id")
+                --account-name "$acct_name" --auth-mode login --subscription "$sub_id" 2>/dev/null)
 
             local file_shares
-            file_shares=$(az_safe "file shares en ${acct_name}" storage share list \
-                --account-name "$acct_name" --auth-mode login --subscription "$sub_id")
+            file_shares=$(az_safe "file shares en ${acct_name}" storage share-rm list \
+                --storage-account "$acct_name" --resource-group "$rg" --subscription "$sub_id" 2>/dev/null)
 
             local tables
             tables=$(az_safe "tables en ${acct_name}" storage table list \
@@ -1071,7 +1098,8 @@ descubrir_messaging() {
 
         # Event Grid Subscriptions (a nivel de suscripción Azure)
         local eg_subs
-        eg_subs=$(az_safe "event grid subs en ${sub_id}" eventgrid event-subscription list --subscription "$sub_id")
+        eg_subs=$(az_safe "event grid subs en ${sub_id}" eventgrid event-subscription list \
+            --location global --subscription "$sub_id")
         eg_subs=$(echo "$eg_subs" | jq --arg sid "$sub_id" '[.[] | . + {subscription_id: $sid}]')
         all_eg_subs=$(echo "$all_eg_subs" "$eg_subs" | jq -s '.[0] + .[1]')
 
@@ -1199,18 +1227,41 @@ descubrir_devops() {
 
     local devops_data="{}"
 
-    # Verificar si la extensión devops está disponible
-    if az devops -h &>/dev/null; then
-        local projects
-        projects=$(az_safe "devops projects" devops project list)
-        devops_data=$(jq -n --argjson p "$projects" '{projects: $p}')
+    # Verificar si la extensión devops está instalada
+    if ! az extension show --name azure-devops &>/dev/null 2>&1; then
+        devops_data='{"note": "Extension azure-devops no instalada"}'
+        log "WARN" "Azure DevOps extension no instalada"
+        write_temp "18_devops" "$devops_data"
+        progress "Azure DevOps (extensión no instalada - skip)"
+        return
+    fi
+
+    # Verificar si hay una organización configurada
+    local configured_org
+    configured_org=$(az devops configure --list 2>/dev/null | grep "organization" | awk '{print $NF}')
+
+    if [[ -z "$configured_org" || "$configured_org" == "Not" ]]; then
+        # Intentar detectar organizaciones accesibles sin bloquearse
+        # az devops project list SIN organización se queda colgado pidiendo input
+        devops_data='{"note": "Extension instalada pero sin organizacion configurada. Ejecutar: az devops configure --defaults organization=https://dev.azure.com/MI_ORG"}'
+        log "WARN" "Azure DevOps: sin organización configurada, skip para evitar bloqueo"
+        write_temp "18_devops" "$devops_data"
+        progress "Azure DevOps (sin organización configurada - skip)"
+        return
+    fi
+
+    # Organización configurada - obtener proyectos con timeout
+    local projects
+    projects=$(timeout 15 az devops project list --organization "$configured_org" --output json 2>/dev/null)
+    if [[ $? -ne 0 ]] || [[ -z "$projects" ]]; then
+        devops_data=$(jq -n --arg org "$configured_org" '{note: "Organización configurada pero no se pudo listar proyectos", organization: $org}')
+        log "WARN" "Azure DevOps: timeout o error listando proyectos en $configured_org"
     else
-        devops_data='{"note": "Extension azure-devops no instalada o no configurada"}'
-        log "WARN" "Azure DevOps extension no disponible"
+        devops_data=$(jq -n --arg org "$configured_org" --argjson p "$projects" '{organization: $org, projects: $p}')
     fi
 
     write_temp "18_devops" "$devops_data"
-    progress "Azure DevOps (verificado)"
+    progress "Azure DevOps (org: $configured_org)"
 }
 
 
@@ -1241,11 +1292,18 @@ descubrir_security() {
         policy_defs=$(echo "$policy_defs" | jq --arg sid "$sub_id" '[.[] | . + {subscription_id: $sid}]')
         all_policy_definitions=$(echo "$all_policy_definitions" "$policy_defs" | jq -s '.[0] + .[1]')
 
-        # Role Assignments (RBAC)
+        # Role Assignments (RBAC) - puede ser grande en tenants enterprise
         local role_assignments
         role_assignments=$(az_safe "role assignments en ${sub_id}" role assignment list \
             --all --subscription "$sub_id")
-        role_assignments=$(echo "$role_assignments" | jq --arg sid "$sub_id" '[.[] | . + {subscription_id: $sid}]')
+        if [[ ${#role_assignments} -gt 1000000 ]]; then
+            # Si es mayor a 1MB, escribir a archivo directamente
+            echo "$role_assignments" | jq --arg sid "$sub_id" '[.[] | . + {subscription_id: $sid}]' \
+                >> "${TEMP_DIR}/_rbac_large.json"
+            role_assignments="[]"
+        else
+            role_assignments=$(echo "$role_assignments" | jq --arg sid "$sub_id" '[.[] | . + {subscription_id: $sid}]')
+        fi
         all_role_assignments=$(echo "$all_role_assignments" "$role_assignments" | jq -s '.[0] + .[1]')
 
         # Microsoft Defender for Cloud Pricing
@@ -1327,26 +1385,28 @@ descubrir_data_services() {
     while IFS= read -r sub_id; do
         [ -z "$sub_id" ] && continue
 
-        # Azure Data Factory
+        # Azure Data Factory (requiere extensión 'datafactory')
         local factories
         factories=$(az_safe "data factories en ${sub_id}" datafactory list --subscription "$sub_id")
-        for factory_name in $(echo "$factories" | jq -r '.[].name // empty'); do
-            local rg=$(echo "$factories" | jq -r --arg n "$factory_name" '.[] | select(.name==$n) | .resourceGroup')
+        if [[ "$factories" != "[]" ]]; then
+            for factory_name in $(echo "$factories" | jq -r '.[].name // empty'); do
+                local rg=$(echo "$factories" | jq -r --arg n "$factory_name" '.[] | select(.name==$n) | .resourceGroup')
 
-            # Pipelines
-            local pipelines
-            pipelines=$(az_safe "pipelines en ${factory_name}" datafactory pipeline list \
-                --factory-name "$factory_name" --resource-group "$rg" --subscription "$sub_id")
+                # Pipelines
+                local pipelines
+                pipelines=$(az_safe "pipelines en ${factory_name}" datafactory pipeline list \
+                    --factory-name "$factory_name" --resource-group "$rg" --subscription "$sub_id")
 
-            # Linked Services
-            local linked_services
-            linked_services=$(az_safe "linked services en ${factory_name}" datafactory linked-service list \
-                --factory-name "$factory_name" --resource-group "$rg" --subscription "$sub_id")
+                # Linked Services
+                local linked_services
+                linked_services=$(az_safe "linked services en ${factory_name}" datafactory linked-service list \
+                    --factory-name "$factory_name" --resource-group "$rg" --subscription "$sub_id")
 
-            factories=$(echo "$factories" | jq --arg n "$factory_name" \
-                --argjson p "$pipelines" --argjson ls "$linked_services" \
-                '[.[] | if .name == $n then . + {pipelines: $p, linked_services: $ls} else . end]')
-        done
+                factories=$(echo "$factories" | jq --arg n "$factory_name" \
+                    --argjson p "$pipelines" --argjson ls "$linked_services" \
+                    '[.[] | if .name == $n then . + {pipelines: $p, linked_services: $ls} else . end]')
+            done
+        fi
         factories=$(echo "$factories" | jq --arg sid "$sub_id" '[.[] | . + {subscription_id: $sid}]')
         all_adf=$(echo "$all_adf" "$factories" | jq -s '.[0] + .[1]')
 
@@ -1519,40 +1579,44 @@ descubrir_costs() {
                        date -u -v-3m +"%Y-%m-%dT00:00:00Z" 2>/dev/null || \
                        echo "$(date -u +%Y-%m-%d)T00:00:00Z")
 
+    # Verificar si costmanagement está disponible (con timeout corto)
+    if ! timeout 5 az costmanagement --help &>/dev/null 2>&1; then
+        log "WARN" "costmanagement no disponible"
+        jq -n '{note: "Extension costmanagement no disponible"}' > "${TEMP_DIR}/22_costs.json"
+        progress "Cost Management (extensión no disponible - skip)"
+        return
+    fi
+
     while IFS= read -r sub_id; do
         [ -z "$sub_id" ] && continue
 
-        # Intentar obtener costos usando la API de cost management
-        # Nota: Esto requiere al menos Cost Management Reader role
-        local costs
-        costs=$(az_safe "costos en ${sub_id}" costmanagement query \
+        # Cost queries pueden ser lentas, timeout de 45s
+        local cost_file="${TEMP_DIR}/_cost_${sub_id##*/}.json"
+        timeout 45 az costmanagement query \
             --type ActualCost \
             --timeframe Custom \
             --time-period "{\"from\":\"${start_date}\",\"to\":\"${end_date}\"}" \
             --dataset-aggregation "{\"totalCost\":{\"name\":\"Cost\",\"function\":\"Sum\"}}" \
             --dataset-grouping name=ResourceGroupName type=Dimension \
-            --scope "subscriptions/${sub_id}")
+            --scope "subscriptions/${sub_id}" \
+            --output json > "$cost_file" 2>/dev/null
 
-        if [ "$costs" != "[]" ] && [ "$costs" != "{}" ]; then
-            local cost_entry
-            cost_entry=$(jq -n --arg sid "$sub_id" --argjson c "$costs" \
-                '{subscription_id: $sid, cost_data: $c}')
-            all_costs=$(echo "$all_costs" | jq --argjson e "$cost_entry" '. + [$e]')
+        if [[ $? -eq 0 ]] && [[ -s "$cost_file" ]] && jq empty "$cost_file" 2>/dev/null; then
+            all_costs=$(jq --arg sid "$sub_id" --slurpfile c "$cost_file" \
+                '. + [{subscription_id: $sid, cost_data: $c[0]}]' <<< "$all_costs")
         fi
 
     done < "${TEMP_DIR}/subscription_ids.txt"
 
-    local cost_json
-    cost_json=$(jq -n \
+    jq -n \
         --arg start "$start_date" \
         --arg end "$end_date" \
         --argjson costs "$all_costs" \
         '{
             period: {start: $start, end: $end},
             costs_by_subscription: $costs
-        }')
+        }' > "${TEMP_DIR}/22_costs.json"
 
-    write_temp "22_costs" "$cost_json"
     progress "Cost Management (últimos 3 meses)"
 }
 
@@ -1562,115 +1626,101 @@ descubrir_costs() {
 ensamblar_json_maestro() {
     section "ENSAMBLANDO JSON MAESTRO"
 
-    # Leer todos los archivos temporales y construir el JSON final
-    local contexto=$(cat "${TEMP_DIR}/00_contexto.json" 2>/dev/null || echo '{}')
-    local entra_id=$(cat "${TEMP_DIR}/01_entra_id.json" 2>/dev/null || echo '{}')
-    local resource_groups=$(cat "${TEMP_DIR}/02_resource_groups.json" 2>/dev/null || echo '[]')
-    local compute=$(cat "${TEMP_DIR}/03_compute.json" 2>/dev/null || echo '{}')
-    local aks=$(cat "${TEMP_DIR}/04_aks.json" 2>/dev/null || echo '[]')
-    local app_service=$(cat "${TEMP_DIR}/05_app_service.json" 2>/dev/null || echo '{}')
-    local container_apps=$(cat "${TEMP_DIR}/06_container_apps.json" 2>/dev/null || echo '{}')
-    local container_instances=$(cat "${TEMP_DIR}/07_container_instances.json" 2>/dev/null || echo '[]')
-    local networking=$(cat "${TEMP_DIR}/08_networking.json" 2>/dev/null || echo '{}')
-    local load_balancing=$(cat "${TEMP_DIR}/09_load_balancing.json" 2>/dev/null || echo '{}')
-    local dns_firewall=$(cat "${TEMP_DIR}/10_dns_firewall.json" 2>/dev/null || echo '{}')
-    local databases=$(cat "${TEMP_DIR}/11_databases.json" 2>/dev/null || echo '{}')
-    local storage=$(cat "${TEMP_DIR}/12_storage.json" 2>/dev/null || echo '[]')
-    local keyvault=$(cat "${TEMP_DIR}/13_keyvault.json" 2>/dev/null || echo '[]')
-    local monitoring=$(cat "${TEMP_DIR}/14_monitoring.json" 2>/dev/null || echo '{}')
-    local messaging=$(cat "${TEMP_DIR}/15_messaging.json" 2>/dev/null || echo '{}')
-    local integration=$(cat "${TEMP_DIR}/16_integration.json" 2>/dev/null || echo '{}')
-    local container_registry=$(cat "${TEMP_DIR}/17_container_registry.json" 2>/dev/null || echo '[]')
-    local devops=$(cat "${TEMP_DIR}/18_devops.json" 2>/dev/null || echo '{}')
-    local security=$(cat "${TEMP_DIR}/19_security.json" 2>/dev/null || echo '{}')
-    local backup=$(cat "${TEMP_DIR}/20_backup.json" 2>/dev/null || echo '[]')
-    local data_services=$(cat "${TEMP_DIR}/21_data_services.json" 2>/dev/null || echo '{}')
-    local costs=$(cat "${TEMP_DIR}/22_costs.json" 2>/dev/null || echo '{}')
-    local cdn=$(cat "${TEMP_DIR}/23_cdn.json" 2>/dev/null || echo '[]')
-    local private_dns=$(cat "${TEMP_DIR}/24_private_dns.json" 2>/dev/null || echo '[]')
-    local bastion=$(cat "${TEMP_DIR}/25_bastion.json" 2>/dev/null || echo '[]')
-    local cognitive_services=$(cat "${TEMP_DIR}/26_cognitive_services.json" 2>/dev/null || echo '[]')
-    local static_web_apps=$(cat "${TEMP_DIR}/27_static_web_apps.json" 2>/dev/null || echo '[]')
-    local managed_identities=$(cat "${TEMP_DIR}/28_managed_identities.json" 2>/dev/null || echo '[]')
+    # Asegurar que todos los archivos temporales existen (crear vacíos si no)
+    for f in 00_contexto 01_entra_id 02_resource_groups 03_compute 04_aks \
+             05_app_service 06_container_apps 07_container_instances 08_networking \
+             09_load_balancing 10_dns_firewall 11_databases 12_storage 13_keyvault \
+             14_monitoring 15_messaging 16_integration 17_container_registry \
+             18_devops 19_security 20_backup 21_data_services 22_costs \
+             23_cdn 24_private_dns 25_bastion 26_cognitive_services \
+             27_static_web_apps 28_managed_identities; do
+        [[ -f "${TEMP_DIR}/${f}.json" ]] || echo '{}' > "${TEMP_DIR}/${f}.json"
+        # Validar JSON, reemplazar con vacío si está corrupto
+        jq empty "${TEMP_DIR}/${f}.json" 2>/dev/null || echo '{}' > "${TEMP_DIR}/${f}.json"
+    done
 
-    # Construir JSON maestro con jq
+    # Usar --slurpfile para evitar ARG_MAX (lee de archivos, no de argumentos)
     jq -n \
-        --argjson contexto "$contexto" \
-        --argjson entra "$entra_id" \
-        --argjson rgs "$resource_groups" \
-        --argjson compute "$compute" \
-        --argjson aks "$aks" \
-        --argjson appsvc "$app_service" \
-        --argjson ca "$container_apps" \
-        --argjson ci "$container_instances" \
-        --argjson net "$networking" \
-        --argjson lb "$load_balancing" \
-        --argjson dnsfw "$dns_firewall" \
-        --argjson db "$databases" \
-        --argjson stor "$storage" \
-        --argjson kv "$keyvault" \
-        --argjson mon "$monitoring" \
-        --argjson msg "$messaging" \
-        --argjson integ "$integration" \
-        --argjson acr "$container_registry" \
-        --argjson devops "$devops" \
-        --argjson sec "$security" \
-        --argjson bkp "$backup" \
-        --argjson data "$data_services" \
-        --argjson costs "$costs" \
-        --argjson cdn "$cdn" \
-        --argjson pdns "$private_dns" \
-        --argjson bastion "$bastion" \
-        --argjson cognitive "$cognitive_services" \
-        --argjson swa "$static_web_apps" \
-        --argjson mi "$managed_identities" \
+        --slurpfile contexto "${TEMP_DIR}/00_contexto.json" \
+        --slurpfile entra "${TEMP_DIR}/01_entra_id.json" \
+        --slurpfile rgs "${TEMP_DIR}/02_resource_groups.json" \
+        --slurpfile compute "${TEMP_DIR}/03_compute.json" \
+        --slurpfile aks "${TEMP_DIR}/04_aks.json" \
+        --slurpfile appsvc "${TEMP_DIR}/05_app_service.json" \
+        --slurpfile ca "${TEMP_DIR}/06_container_apps.json" \
+        --slurpfile ci "${TEMP_DIR}/07_container_instances.json" \
+        --slurpfile net "${TEMP_DIR}/08_networking.json" \
+        --slurpfile lb "${TEMP_DIR}/09_load_balancing.json" \
+        --slurpfile dnsfw "${TEMP_DIR}/10_dns_firewall.json" \
+        --slurpfile db "${TEMP_DIR}/11_databases.json" \
+        --slurpfile stor "${TEMP_DIR}/12_storage.json" \
+        --slurpfile kv "${TEMP_DIR}/13_keyvault.json" \
+        --slurpfile mon "${TEMP_DIR}/14_monitoring.json" \
+        --slurpfile msg "${TEMP_DIR}/15_messaging.json" \
+        --slurpfile integ "${TEMP_DIR}/16_integration.json" \
+        --slurpfile acr "${TEMP_DIR}/17_container_registry.json" \
+        --slurpfile devops "${TEMP_DIR}/18_devops.json" \
+        --slurpfile sec "${TEMP_DIR}/19_security.json" \
+        --slurpfile bkp "${TEMP_DIR}/20_backup.json" \
+        --slurpfile data "${TEMP_DIR}/21_data_services.json" \
+        --slurpfile costs "${TEMP_DIR}/22_costs.json" \
+        --slurpfile cdn "${TEMP_DIR}/23_cdn.json" \
+        --slurpfile pdns "${TEMP_DIR}/24_private_dns.json" \
+        --slurpfile bastion "${TEMP_DIR}/25_bastion.json" \
+        --slurpfile cognitive "${TEMP_DIR}/26_cognitive_services.json" \
+        --slurpfile swa "${TEMP_DIR}/27_static_web_apps.json" \
+        --slurpfile mi "${TEMP_DIR}/28_managed_identities.json" \
         '{
             _metadata: {
                 script: "levantamiento-azure.sh",
-                version: "1.1.0",
-                generated_at: $contexto.timestamp_utc,
-                tenant_id: $contexto.tenant_id,
-                total_subscriptions: $contexto.total_subscriptions
+                version: "1.2.0",
+                generated_at: ($contexto[0].timestamp_utc // "unknown"),
+                tenant_id: ($contexto[0].tenant_id // "unknown"),
+                total_subscriptions: ($contexto[0].total_subscriptions // 0)
             },
-            contexto: $contexto,
-            entra_id: $entra,
-            resource_groups: $rgs,
-            compute: $compute,
-            aks_clusters: $aks,
-            app_service: $appsvc,
-            container_apps: $ca,
-            container_instances: $ci,
-            networking: $net,
-            load_balancing: $lb,
-            dns_and_firewall: $dnsfw,
-            databases: $db,
-            storage_accounts: $stor,
-            key_vaults: $kv,
-            monitoring: $mon,
-            messaging: $msg,
-            integration: $integ,
-            container_registries: $acr,
-            azure_devops: $devops,
-            security_and_compliance: $sec,
-            backup: $bkp,
-            data_services: $data,
-            cdn_profiles: $cdn,
-            private_dns_zones: $pdns,
-            bastion_hosts: $bastion,
-            cognitive_services: $cognitive,
-            static_web_apps: $swa,
-            managed_identities: $mi,
-            cost_management: $costs
+            contexto: $contexto[0],
+            entra_id: $entra[0],
+            resource_groups: $rgs[0],
+            compute: $compute[0],
+            aks_clusters: $aks[0],
+            app_service: $appsvc[0],
+            container_apps: $ca[0],
+            container_instances: $ci[0],
+            networking: $net[0],
+            load_balancing: $lb[0],
+            dns_and_firewall: $dnsfw[0],
+            databases: $db[0],
+            storage_accounts: $stor[0],
+            key_vaults: $kv[0],
+            monitoring: $mon[0],
+            messaging: $msg[0],
+            integration: $integ[0],
+            container_registries: $acr[0],
+            azure_devops: $devops[0],
+            security_and_compliance: $sec[0],
+            backup: $bkp[0],
+            data_services: $data[0],
+            cdn_profiles: $cdn[0],
+            private_dns_zones: $pdns[0],
+            bastion_hosts: $bastion[0],
+            cognitive_services: $cognitive[0],
+            static_web_apps: $swa[0],
+            managed_identities: $mi[0],
+            cost_management: $costs[0]
         }' > "${OUTPUT_FILE}"
 
-    echo -e "${GREEN}✓ JSON maestro generado: ${OUTPUT_FILE}${NC}"
+    if [[ -s "${OUTPUT_FILE}" ]] && jq empty "${OUTPUT_FILE}" 2>/dev/null; then
+        echo -e "${GREEN}✓ JSON maestro generado: ${OUTPUT_FILE}${NC}"
+    else
+        echo -e "${RED}✗ Error generando JSON maestro. Los archivos individuales están en: ${TEMP_DIR}/${NC}"
+    fi
 }
 
 #===============================================================================
 # FUNCIÓN: RESUMEN FINAL
 #===============================================================================
 mostrar_resumen() {
-    local file_size=$(du -h "${OUTPUT_FILE}" | cut -f1)
+    local file_size=$(du -h "${OUTPUT_FILE}" 2>/dev/null | cut -f1)
     local duration=$((SECONDS / 60))
     local duration_sec=$((SECONDS % 60))
 
@@ -1688,13 +1738,13 @@ mostrar_resumen() {
     echo -e "${BLUE}║${NC} ${YELLOW}Resumen de recursos descubiertos:${NC}"
 
     # Contar recursos principales del JSON
-    if [ -f "${OUTPUT_FILE}" ]; then
-        local vm_count=$(jq '.compute.virtual_machines | length' "${OUTPUT_FILE}" 2>/dev/null || echo "0")
-        local vnet_count=$(jq '.networking.virtual_networks | length' "${OUTPUT_FILE}" 2>/dev/null || echo "0")
-        local sql_count=$(jq '.databases.azure_sql_servers | length' "${OUTPUT_FILE}" 2>/dev/null || echo "0")
-        local storage_count=$(jq '.storage_accounts | length' "${OUTPUT_FILE}" 2>/dev/null || echo "0")
-        local aks_count=$(jq '.aks_clusters | length' "${OUTPUT_FILE}" 2>/dev/null || echo "0")
-        local kv_count=$(jq '.key_vaults | length' "${OUTPUT_FILE}" 2>/dev/null || echo "0")
+    if [[ -f "${OUTPUT_FILE}" ]] && jq empty "${OUTPUT_FILE}" 2>/dev/null; then
+        local vm_count=$(jq '.compute.virtual_machines | length // 0' "${OUTPUT_FILE}" 2>/dev/null || echo "0")
+        local vnet_count=$(jq '.networking.virtual_networks | length // 0' "${OUTPUT_FILE}" 2>/dev/null || echo "0")
+        local sql_count=$(jq '.databases.azure_sql_servers | length // 0' "${OUTPUT_FILE}" 2>/dev/null || echo "0")
+        local storage_count=$(jq '.storage_accounts | length // 0' "${OUTPUT_FILE}" 2>/dev/null || echo "0")
+        local aks_count=$(jq '.aks_clusters | length // 0' "${OUTPUT_FILE}" 2>/dev/null || echo "0")
+        local kv_count=$(jq '.key_vaults | length // 0' "${OUTPUT_FILE}" 2>/dev/null || echo "0")
 
         echo -e "${BLUE}║${NC}   - Virtual Machines: ${CYAN}${vm_count}${NC}"
         echo -e "${BLUE}║${NC}   - Virtual Networks: ${CYAN}${vnet_count}${NC}"
@@ -1702,15 +1752,29 @@ mostrar_resumen() {
         echo -e "${BLUE}║${NC}   - Storage Accounts: ${CYAN}${storage_count}${NC}"
         echo -e "${BLUE}║${NC}   - AKS Clusters: ${CYAN}${aks_count}${NC}"
         echo -e "${BLUE}║${NC}   - Key Vaults: ${CYAN}${kv_count}${NC}"
+    else
+        echo -e "${BLUE}║${NC}   ${RED}(JSON maestro no generado correctamente)${NC}"
     fi
 
     echo -e "${BLUE}╚══════════════════════════════════════════════════════════════════╝${NC}"
     echo ""
 
-    # Limpiar archivos temporales
-    rm -rf "${TEMP_DIR}"
-    echo -e "${GREEN}Archivos temporales eliminados.${NC}"
-    echo -e "${GREEN}¡Levantamiento completado exitosamente!${NC}"
+    # Limpiar solo archivos internos de trabajo (NO el output)
+    rm -f "${TEMP_DIR}"/_cmd_result*.json "${TEMP_DIR}"/_entra_*.json "${TEMP_DIR}"/_cost_*.json
+    rm -f "${TEMP_DIR}/subscription_ids.txt"
+
+    echo -e "${GREEN}Levantamiento completado.${NC}"
+    echo ""
+    echo -e "${YELLOW}━━━ DESCARGAR RESULTADO ━━━${NC}"
+    echo ""
+    echo "  En la barra superior de Cloud Shell:"
+    echo "  Click ⬇ (Download) → escribir: levantamiento-azure.tar.gz → Download"
+    echo ""
+    
+    # Comprimir automáticamente para que esté listo para descargar
+    tar czf ~/levantamiento-azure.tar.gz -C "$(dirname "${OUTPUT_DIR}")" "$(basename "${OUTPUT_DIR}")" 2>/dev/null
+    echo -e "  Archivo listo: ${GREEN}~/levantamiento-azure.tar.gz${NC}"
+    echo ""
 }
 
 #===============================================================================
