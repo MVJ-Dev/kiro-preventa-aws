@@ -7,6 +7,8 @@ Toolkit compartido para usar [Kiro CLI](https://kiro.dev) como arquitecto de pre
 ```
 kiro-preventa-aws/
 ├── CONTEXTO-KIRO-TEMPLATE.md         ← Template del archivo de contexto (personalizar)
+├── docs/                             ← Guías detalladas
+│   └── guia-calculadoras-aws.md      ← Configuración MCP server + reglas de calculadoras
 ├── scripts-levantamiento/            ← Scripts para que los clientes levanten su infra
 │   ├── aws/levantamiento-aws.sh
 │   ├── azure/levantamiento-azure.sh
@@ -88,7 +90,24 @@ curl -Ls https://micro.mamba.pm/api/micromamba/linux-64/latest | tar -xvj -C /tm
 
 ### 8. Configurar MCP Server de AWS Pricing Calculator (para calculadoras)
 
-Seguir instrucciones del [MCP server de AWS Pricing Calculator](https://github.com/aws-samples/sample-aws-pricing-calculator-mcp).
+Este es el componente que permite a Kiro crear calculadoras reales en calculator.aws.
+
+**Configuración rápida** — crear/editar `~/.kiro/settings/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "aws-pricing-calculator-mcp-server": {
+      "command": "npx",
+      "args": ["-y", "sample-aws-pricing-calculator-mcp@latest"]
+    }
+  }
+}
+```
+
+No requiere API keys ni credenciales AWS. Solo necesita Node.js 18+.
+
+**Para la guía completa** con reglas de estructura, checklist Well-Architected, troubleshooting y todas las convenciones: ver [docs/guia-calculadoras-aws.md](docs/guia-calculadoras-aws.md).
 
 ## Uso Diario
 
