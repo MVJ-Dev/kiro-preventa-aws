@@ -12,7 +12,37 @@ Esta guía explica cómo configurar y usar Kiro CLI para generar calculadoras de
 
 ---
 
-## 1. Configuración del MCP Server
+## 0. Dos MCPs, un flujo (IMPORTANTE)
+
+Para calculadoras se usan **dos** MCP servers complementarios:
+
+| MCP | Para qué | Cuándo |
+|---|---|---|
+| **aws-pricing-mcp-server** (awslabs) | Consultar precios REALES en tiempo real desde la Pricing API | ANTES de armar la calculadora, para verificar costos |
+| **aws-pricing-calculator-mcp-server** | Crear/exportar el estimate en calculator.aws con link compartible | Para construir la calculadora con precios ya validados |
+
+**Flujo correcto:**
+1. Consultar precios reales con `aws-pricing-mcp-server`
+2. Armar la calculadora con `aws-pricing-calculator-mcp-server`
+3. Exportar y verificar con `import_estimate` (markdown)
+4. Solo entregar si el total tiene sentido
+
+Configuración del segundo MCP (Pricing API en tiempo real):
+```json
+{
+  "mcpServers": {
+    "aws-pricing-mcp-server": {
+      "command": "uvx",
+      "args": ["--from", "awslabs-aws-pricing-mcp-server", "awslabs.aws-pricing-mcp-server"]
+    }
+  }
+}
+```
+Requiere `uv`/`uvx` instalado y credenciales AWS (`aws configure`) con lectura en Pricing API (us-east-1).
+
+---
+
+## 1. Configuración del MCP Server (Calculadora)
 
 ### Qué es
 
@@ -20,7 +50,6 @@ El **AWS Pricing Calculator MCP Server** es un servidor [Model Context Protocol]
 
 - **Repo oficial:** https://github.com/aws-samples/sample-aws-pricing-calculator-mcp
 - **Paquete npm:** `sample-aws-pricing-calculator-mcp`
-- **Versión actual:** 1.2.8
 
 ### Instalación
 
@@ -282,6 +311,28 @@ find ~ -name "mcp.json" -path "*kiro*"
 - Asegúrate de especificar la **región**. Sin región, muchos servicios no calculan precio.
 - Para Lambda: necesita `sizeOfMemoryAllocated`, `storageAmountEphemeral`, y `architecture` para producir precio.
 - Para EC2: necesita el instance type explícito.
+
+### Servicios que el MCP NO maneja bien (quedan en $0) — LECCIÓN CRÍTICA
+Los servicios con **`columnFormIPM`** (tabla de instancias) suelen quedar en **$0** al exportar vía MCP:
+- **RDS** (`columnFormIPM`)
+- **ElastiCache** (`columnFormIPMDT` + `columnFormIPM_dsp` + `columnFormIPM`)
+- **SageMaker** (`columnFormIPM` dentro de subServices)
+- **Fargate** con `taskDuration` en formato incorrecto → usar `{"value":"30","unit":"day"}`, NO `{"value":"720","unit":"hour"}`
+
+**Regla:** NUNCA reconstruir una calculadora completa con el MCP si tiene RDS, ElastiCache o SageMaker — esos servicios son la mayoría del costo y quedan en $0. Lo correcto:
+1. Investigar precios reales (aws-pricing-mcp-server o web AWS)
+2. Calcular los incrementos con esos precios
+3. Dar instrucciones EXACTAS de edición manual en calculator.aws
+4. NO crear links rotos
+
+**Servicios que el MCP SÍ maneja bien:** S3, Fargate (taskDuration en "day"), NLB, WAF, CloudWatch, Route 53, VPN, NAT Gateway, Data Transfer, Secrets Manager, ECR.
+
+### Verificación obligatoria antes de entregar
+**NUNCA entregar un link sin verificar el precio total primero:**
+1. `export_estimate` → link
+2. `import_estimate` (markdown) → verificar Total Monthly Cost
+3. Si es $0 o muy bajo → NO entregar, diagnosticar, corregir
+4. Solo entregar cuando el precio verificado coincida con lo esperado
 
 ### El estimate se guarda pero está "frozen" (no editable)
 - Ejecutar `validate_estimate` antes de `export_estimate` para verificar que el payload es válido.

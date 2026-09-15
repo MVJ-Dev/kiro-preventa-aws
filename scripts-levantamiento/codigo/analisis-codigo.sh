@@ -6,7 +6,7 @@
 #
 # Uso: ./analisis-codigo.sh /ruta/al/repositorio [archivo_salida.json]
 #
-# Autor: Mathias Von - Arquitecto Preventa AWS
+# Autor: Equipo Preventa AWS
 # Fecha: 2026-07-13
 # =============================================================================
 

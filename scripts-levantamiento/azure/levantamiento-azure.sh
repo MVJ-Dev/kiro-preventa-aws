@@ -4,7 +4,7 @@
 #===============================================================================
 # Descripción: Descubre TODA la infraestructura Azure accesible con permisos
 #              de lectura (Reader role). Genera un archivo JSON maestro.
-# Autor: Mathias Von - Arquitecto Preventa AWS
+# Autor: Equipo Preventa AWS
 # Fecha: 2026-07-13
 # Uso: ./levantamiento-azure.sh
 # Requisitos: Azure CLI (az) instalado y autenticado
