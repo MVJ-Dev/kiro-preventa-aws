@@ -13,6 +13,14 @@ Configurar en `~/.kiro/settings/mcp.json`. Ver `docs/guia-calculadoras-aws.md` y
 - **Para qué:** Crear, modificar y exportar calculadoras en calculator.aws con link compartible
 - **Cuándo usar:** Cuando se pida una calculadora con link de calculator.aws
 - **Limitaciones conocidas:** RDS y ElastiCache pueden quedar en $0 (columnFormIPM no se procesa bien). Siempre verificar precio después de exportar.
+- **Comportamientos verificados del MCP** (destilados del agente `MO-Proposals` de **Nicolás Delgado** — evitan fallos de exportación):
+  - Un lote de `add_service` se **revierte completo si una sola entrada falla** la validación. Enviar primero, en lote pequeño, las entradas de shape desconocido antes del lote grande.
+  - `awsFargate` con `vcpuPerTask = 0.5` **exige** `memoryStandardFargateOnDemand` (fileSize en GB) y **rechaza** `smallMemory`.
+  - `awsConfig` **no acepta 0** en `numberOfConformancePackEvaluations`; el mínimo es 1 y su impacto es despreciable.
+  - `networkAddressTranslationNatGatewayVpc` no acepta 0 en los campos regionales; modelar con `regionalNatGatewayCount = 1` y `regionalNatGatewayAzCount = 1` (mismo precio/hora que un NAT Gateway estándar).
+  - `awsCloudTrail` requiere los **cuatro** multiplicadores (`OpsMult`, `dataOpsMult`, `networkActivityOpsMult`, `eventMult`) o queda parcial.
+  - AWS Backup para RDS se agrega con la clave `rdsBackup`; `amazonRdsBackup` es un subservicio sin envoltorio y **bloquea la exportación**.
+  - El MCP no devuelve costos calculados: el desglose se arma con precios unitarios del price list público (`https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/<OfferCode>/current/<region>/index.csv`) y el enlace de la calculadora es la fuente autoritativa.
 
 ### 2. Lucid Software
 - **Comando:** `npx -y mcp-remote https://mcp.lucid.app/mcp`

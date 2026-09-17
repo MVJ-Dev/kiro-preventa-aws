@@ -26,7 +26,8 @@ kiro-preventa-aws/
     ├── contexto-obligatorio.md
     ├── levantamiento-clientes.md
     ├── mcp-servers.md
-    └── migracion-aws-conocimiento.md
+    ├── migracion-aws-conocimiento.md
+    └── propuestas-morris-opazo.md   ← Formato de propuesta M&O (15 secciones) — cortesía de Nicolás Delgado
 ```
 
 ## Setup Inicial (una sola vez)
@@ -142,3 +143,12 @@ Si mejoras un script, agregas un proveedor, o encuentras una mejor forma de hace
 1. Crea un branch con tu cambio
 2. Haz PR al main
 3. **No incluir datos de clientes** en el PR
+
+## Créditos
+
+- **Nicolás Delgado** (equipo Morris & Opazo) — autor original del agente interno `MO-Proposals`, del cual
+  provienen `steering/propuestas-morris-opazo.md` (plantilla de propuesta de 15 secciones, reglas de
+  redacción de criterios y alcances, coherencia numérica y estructura de cierre) y los comportamientos
+  verificados del MCP de la calculadora AWS documentados en `steering/mcp-servers.md`. Todo el mérito de
+  esa metodología es suyo; aquí se generaliza como estándar compartido del equipo, reutilizando la forma
+  y nunca los datos de un cliente.
