@@ -128,6 +128,31 @@ Usar esas arquitecturas para validar el diseño propio. Si difiere del patrón o
 
 ---
 
+## Lección #9 — Scripts de levantamiento cloud (GCP/Azure/AWS): read-only de verdad, sin huella, y validados con stubs
+
+Al generar o revisar un script de inventario de infraestructura de un cliente (ej. `levantamiento-gcp.sh`), aplicar este checklist. Varios de estos puntos salieron de bugs reales que `bash -n` y `shellcheck` NO detectan (son semánticos, no de sintaxis):
+
+**Seguridad / confidencialidad (lo que le debes al cliente):**
+1. **100% solo lectura.** Solo verbos `list` / `describe` / `show` / `get-*` / `export-policy` / `du`. Ningún `create/delete/update/set/add/remove/deploy/patch/enable/start/stop`. Con `roles/viewer` IAM lo impide igual, pero el script no debe ni intentarlo. Auditar extrayendo todos los verbos: `grep -oE "gcloud [a-z]+ [a-z-]+"`.
+2. **Cero jobs / cero huella.** El sizing de BigQuery con `bq query` (aunque sea sobre `__TABLES__`) **crea un job** en el proyecto del cliente y queda en su audit log. Usar `bq show` (metadata pura) → cero jobs. Lo mismo: evitar cualquier comando que genere entradas facturables.
+3. **Redactar secretos antes de descargar.** Aunque NO leas Secret Manager, estos list/describe traen credenciales en texto plano: env vars de Cloud Run/Functions (`.env[].value`, `environmentVariables`), `startup-script`/`ssh-keys` en metadata de VMs, `substitutions` de Cloud Build. Redactarlos a `[REDACTED]` con jq (conservando los nombres) ANTES de armar el `.tar.gz`. Avisar que los JSON (emails IAM, firewall) son confidenciales y borrar la carpeta tras descargar.
+
+**Correctitud (bugs que dan resultados vacíos sin avisar):**
+4. **GCS necesita `gs://`.** `buckets describe`/`du` fallan con el nombre pelado. Usar `--format="value(storage_url)"`.
+5. **Límites de listado por defecto.** `bq ls` devuelve 50 datasets y 100 filas por defecto → `--max_results` alto, o se trunca el inventario en silencio.
+6. **Flags que ocultan recursos.** `gcloud functions list --gen2` oculta las gen1 → listar sin `--gen2`. `gcloud alpha monitoring policies` ya es GA → sin `alpha`.
+7. **`--location=-` / `--region=-` no es universal.** No está garantizado para redis, scheduler, dataflow, dataproc, deploy. Iterar regiones explícitas.
+8. **Distinguir timeout de "vacío".** Un `timeout` (rc 124) NO significa que el servicio esté vacío; significa "no sé, reintenta con más tiempo". Clasificarlo aparte en el `_status.json`, nunca como `sin_recursos`.
+9. **`_status.json` con jq, no con `echo`/`printf`.** Un mensaje de error con comillas o backslash rompe el JSON si se arma a mano.
+10. **Bug de subshell en multi-proyecto.** `echo "$LIST" | while read` corre en subshell (contadores no persisten) y auto-invocarse por pipe es frágil. Iterar con `for` sobre un array.
+
+**Proceso:**
+11. **Validar con stubs, no solo `bash -n`.** Los bugs que importan son semánticos (rutas de campos JSON equivocadas → loops que terminan en 0 elementos con status `ok`, sin avisar). Probar con stubs de `gcloud`/`bq`, o correr primero UN proyecto y verificar que los pares `list` ↔ `detail` tengan el mismo conteo antes de lanzar decenas de proyectos.
+12. **Filtrar por API habilitada** (leer `services enabled` y saltar familias sin API) acelera mucho sin perder info — "sin API no hay recursos". Dejar un flag `--full` para forzar el barrido total cuando se quiera descubrir lo no declarado.
+13. **No asumir qué usa el cliente.** El barrido cubre todas las familias; lo que no declararon pero existe aparece en el `_status.json`. Ese contraste (declarado vs real) es un hallazgo valioso del levantamiento.
+
+---
+
 ## Regla transversal de datos de clientes
 
 - **NUNCA subir datos de clientes** a este repo (nombres, IDs, inventarios, links de documentos privados).
